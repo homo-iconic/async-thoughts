@@ -27,7 +27,7 @@ async function postJob(job) {
     body: JSON.stringify(job)
   });
   const text = await res.text();
-  console.log(`POST ${job.Company} => ${text}`);
+  console.log(`POST ${job.Company || "[blank company]"} | ${job.Role || "[blank role]"} => ${text}`);
 }
 
 (async () => {
@@ -37,68 +37,125 @@ async function postJob(job) {
   });
 
   const seen = new Set();
+  let totalExtracted = 0;
+  let totalPosted = 0;
+  let totalSkipped = 0;
 
   for (const url of SEARCHES) {
     console.log(`SEARCH ${url}`);
+
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(3000);
 
     const jobs = await page.evaluate(() => {
+      function txt(el) {
+        return (el?.textContent || "").replace(/\s+/g, " ").trim();
+      }
+
+      function absHref(href) {
+        try {
+          return new URL(href, location.origin).toString();
+        } catch {
+          return href || "";
+        }
+      }
+
       const out = [];
-      const cards = [...document.querySelectorAll("a[data-jk], a.tapItem, a.jcs-JobTitle")];
 
-      for (const a of cards) {
-        const card = a.closest("div, article, li") || a.parentElement;
-        const title =
-          a.getAttribute("aria-label") ||
-          a.textContent ||
+      const cardSelectors = [
+        '[data-jk]',
+        '.job_seen_beacon',
+        '[data-testid="slider_item"]',
+        'li.result',
+        'table.jobCard_mainContent'
+      ];
+
+      const cardSet = new Set();
+
+      for (const sel of cardSelectors) {
+        document.querySelectorAll(sel).forEach(el => cardSet.add(el));
+      }
+
+      const cards = [...cardSet];
+
+      for (const card of cards) {
+        const titleLink =
+          card.querySelector('h2 a') ||
+          card.querySelector('a.jcs-JobTitle') ||
+          card.querySelector('a[data-jk]') ||
+          card.querySelector('a');
+
+        const role =
+          txt(titleLink) ||
+          titleLink?.getAttribute("aria-label") ||
           "";
 
-        const href = a.href || "";
-        const root = card || document;
+        const url = absHref(titleLink?.href || "");
 
-        const text = root.innerText || "";
         const company =
-          root.querySelector('[data-testid="company-name"]')?.textContent ||
-          root.querySelector(".companyName")?.textContent ||
+          txt(card.querySelector('[data-testid="company-name"]')) ||
+          txt(card.querySelector('.companyName')) ||
+          txt(card.querySelector('[data-testid="company-name-with-rating"]')) ||
           "";
+
         const location =
-          root.querySelector('[data-testid="text-location"]')?.textContent ||
-          root.querySelector(".companyLocation")?.textContent ||
+          txt(card.querySelector('[data-testid="text-location"]')) ||
+          txt(card.querySelector('.companyLocation')) ||
           "";
+
         const pay =
-          root.querySelector('[data-testid="attribute_snippet_testid"]')?.textContent ||
-          root.querySelector(".salary-snippet")?.textContent ||
+          txt(card.querySelector('.salary-snippet')) ||
+          txt(card.querySelector('[data-testid="attribute_snippet_testid"]')) ||
+          txt(card.querySelector('.estimated-salary')) ||
           "";
 
         out.push({
-          Company: company.trim(),
-          Role: title.trim(),
-          Pay: pay.trim(),
-          Notes: location ? `Indeed scrape | Location: ${location.trim()}` : "Indeed scrape",
-          URL: href
+          Company: company,
+          Role: role,
+          Pay: pay,
+          Notes: location ? `Indeed scrape | Location: ${location}` : "Indeed scrape",
+          URL: url
         });
       }
 
       return out;
     });
 
-    for (const job of jobs) {
-      job.Company = clean(job.Company);
-      job.Role = clean(job.Role);
-      job.Pay = clean(job.Pay);
-      job.Notes = clean(job.Notes);
-      job.URL = clean(job.URL);
+    console.log(`FOUND raw jobs: ${jobs.length}`);
 
-      if (!job.Role || !job.URL) continue;
+    const cleanedJobs = jobs
+      .map(job => ({
+        Company: clean(job.Company),
+        Role: clean(job.Role),
+        Pay: clean(job.Pay),
+        Notes: clean(job.Notes),
+        URL: clean(job.URL)
+      }))
+      .filter(job => job.Role && job.URL);
 
+    console.log(`FOUND usable jobs: ${cleanedJobs.length}`);
+
+    if (cleanedJobs.length > 0) {
+      console.log("SAMPLE", JSON.stringify(cleanedJobs.slice(0, 2), null, 2));
+    }
+
+    totalExtracted += cleanedJobs.length;
+
+    for (const job of cleanedJobs) {
       const key = `${job.Company}|${job.Role}|${job.URL}`.toLowerCase();
-      if (seen.has(key)) continue;
+
+      if (seen.has(key)) {
+        totalSkipped++;
+        continue;
+      }
       seen.add(key);
 
       await postJob(job);
+      totalPosted++;
     }
   }
+
+  console.log(`DONE totalExtracted=${totalExtracted} totalPosted=${totalPosted} totalSkipped=${totalSkipped}`);
 
   await browser.close();
 })();
