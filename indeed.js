@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const fs = require('fs');
 
 const WEBAPP_URL = process.env.WEBAPP_URL;
 
@@ -12,9 +13,7 @@ const SEARCHES = [
   "https://www.indeed.com/jobs?q=director+of+restaurants&l=Los+Angeles%2C+CA"
 ];
 
-if (!WEBAPP_URL) {
-  throw new Error("Missing WEBAPP_URL");
-}
+if (!WEBAPP_URL) throw new Error("Missing WEBAPP_URL");
 
 function clean(s) {
   return (s || "").replace(/\s+/g, " ").trim();
@@ -45,13 +44,20 @@ async function postJob(job) {
     console.log(`SEARCH ${url}`);
 
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(4000);
+
+    const pageTitle = await page.title();
+    const finalUrl = page.url();
+    const html = await page.content();
+
+    console.log(`TITLE ${pageTitle}`);
+    console.log(`FINAL_URL ${finalUrl}`);
+    console.log(`HTML_HAS_CAPTCHA ${/captcha|verify you are human|robot|unusual traffic/i.test(html)}`);
 
     const jobs = await page.evaluate(() => {
       function txt(el) {
         return (el?.textContent || "").replace(/\s+/g, " ").trim();
       }
-
       function absHref(href) {
         try {
           return new URL(href, location.origin).toString();
@@ -61,17 +67,15 @@ async function postJob(job) {
       }
 
       const out = [];
-
       const cardSelectors = [
-        '[data-jk]',
         '.job_seen_beacon',
+        '[data-jk]',
         '[data-testid="slider_item"]',
         'li.result',
         'table.jobCard_mainContent'
       ];
 
       const cardSet = new Set();
-
       for (const sel of cardSelectors) {
         document.querySelectorAll(sel).forEach(el => cardSet.add(el));
       }
@@ -90,8 +94,6 @@ async function postJob(job) {
           titleLink?.getAttribute("aria-label") ||
           "";
 
-        const url = absHref(titleLink?.href || "");
-
         const company =
           txt(card.querySelector('[data-testid="company-name"]')) ||
           txt(card.querySelector('.companyName')) ||
@@ -109,12 +111,14 @@ async function postJob(job) {
           txt(card.querySelector('.estimated-salary')) ||
           "";
 
+        const href = absHref(titleLink?.href || "");
+
         out.push({
           Company: company,
           Role: role,
           Pay: pay,
           Notes: location ? `Indeed scrape | Location: ${location}` : "Indeed scrape",
-          URL: url
+          URL: href
         });
       }
 
@@ -137,25 +141,26 @@ async function postJob(job) {
 
     if (cleanedJobs.length > 0) {
       console.log("SAMPLE", JSON.stringify(cleanedJobs.slice(0, 2), null, 2));
+    } else {
+      console.log("HTML_SNIPPET_START");
+      console.log(html.slice(0, 3000));
+      console.log("HTML_SNIPPET_END");
     }
 
     totalExtracted += cleanedJobs.length;
 
     for (const job of cleanedJobs) {
       const key = `${job.Company}|${job.Role}|${job.URL}`.toLowerCase();
-
       if (seen.has(key)) {
         totalSkipped++;
         continue;
       }
       seen.add(key);
-
       await postJob(job);
       totalPosted++;
     }
   }
 
   console.log(`DONE totalExtracted=${totalExtracted} totalPosted=${totalPosted} totalSkipped=${totalSkipped}`);
-
   await browser.close();
 })();
